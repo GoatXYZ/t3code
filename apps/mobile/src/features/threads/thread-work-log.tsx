@@ -474,6 +474,10 @@ interface ThreadWorkLogProps {
   readonly workspaceRoot?: string | null | undefined;
   readonly copiedRowId: string | null;
   readonly expandedRows: Readonly<Record<string, boolean>>;
+  /** Subagent groups start open; `expandedRows` then names the ones closed. */
+  readonly foldsStartOpen: boolean;
+  /** Each row's details start open; `expandedRows` then names the ones closed. */
+  readonly rowsStartOpen: boolean;
   readonly rowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
   readonly scrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
   readonly iconSubtleColor: ColorValue;
@@ -494,7 +498,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       row={row}
       anchorKey={props.anchorKey}
       copied={props.copiedRowId === row.id}
-      expanded={props.expandedRows[row.id] ?? false}
+      expanded={(props.expandedRows[row.id] ?? false) !== props.rowsStartOpen}
       environmentId={props.environmentId}
       iconSubtleColor={props.iconSubtleColor}
       onCopyRow={props.onCopyRow}
@@ -526,7 +530,9 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
     return <ThreadSubagentGroup {...props} />;
   }
 
+  // Above Normal, thinking rows stay individually foldable instead of opening as one trace.
   if (
+    !props.foldsStartOpen &&
     props.activities[0]?.groupedToolDetail &&
     props.activities.every((row) => row.projectedItem.item.type === "reasoning")
   ) {
@@ -548,6 +554,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
           activities={props.activities}
           edgeFadeColor={props.edgeFadeColor}
           expandedRows={props.expandedRows}
+          rowsStartOpen={props.rowsStartOpen}
           groupId={props.anchorKey}
           rowSizing={props.rowSizing}
           scrollPositions={props.scrollPositions}
@@ -613,6 +620,7 @@ function ThreadWorkGroupList(props: {
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
   readonly edgeFadeColor: string;
   readonly expandedRows: Readonly<Record<string, boolean>>;
+  readonly rowsStartOpen: boolean;
   readonly groupId: string;
   readonly rowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
   readonly scrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
@@ -735,7 +743,8 @@ function ThreadWorkGroupList(props: {
     return unsubscribe;
   }, []);
   const getFixedItemSize = (row: ThreadFeedActivity, index: number) =>
-    props.expandedRows[row.id] || props.rowSizing.fixedRowHeight === undefined
+    (row.canExpand && (props.expandedRows[row.id] ?? false) !== props.rowsStartOpen) ||
+    props.rowSizing.fixedRowHeight === undefined
       ? undefined
       : props.rowSizing.fixedRowHeight + (index < props.activities.length - 1 ? WORK_ROW_GAP : 0);
   const renderItem = ({ item, index }: { item: ThreadFeedActivity; index: number }) => (
@@ -914,6 +923,8 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
     | "copiedRowId"
     | "edgeFadeColor"
     | "expandedRows"
+    | "foldsStartOpen"
+    | "rowsStartOpen"
     | "rowSizing"
     | "scrollPositions"
   > & {
@@ -922,7 +933,14 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
     readonly expanded: boolean;
   },
 ) {
-  const { row, expanded } = props;
+  const { row } = props;
+  const notifiedSubagentThreadId =
+    row.projectedItem.item.type === "notification"
+      ? notificationChildThreadId(row.projectedItem.item.source)
+      : undefined;
+  const canExpand = row.canExpand && notifiedSubagentThreadId === undefined;
+  // Verbose opens rows by default, but a row that can't fold must not open.
+  const expanded = props.expanded && canExpand;
   const openLinkedThread = useOpenLinkedThread();
   const streamsOutput =
     useCommandOutputStreaming(props.environmentId) &&
@@ -1006,11 +1024,6 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
       </WorkLogPressable>
     );
   }
-  const notifiedSubagentThreadId =
-    row.projectedItem.item.type === "notification"
-      ? notificationChildThreadId(row.projectedItem.item.source)
-      : undefined;
-  const canExpand = row.canExpand && notifiedSubagentThreadId === undefined;
   const reasoning = row.projectedItem.item.type === "reasoning" ? row.projectedItem.item : null;
   const fetchedItem = fetchedDetail.data?.item ?? null;
   const isRead = toolGroupAction(row.workEntry) === "read";

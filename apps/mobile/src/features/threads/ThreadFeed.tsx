@@ -54,6 +54,7 @@ import {
   type RunId,
   type ScheduledTaskId,
   type ScopedThreadRef,
+  type TranscriptView,
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
@@ -83,6 +84,15 @@ import {
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
 import { resolveViewedImageAsset } from "@t3tools/client-runtime/work-log/presentation";
+import {
+  disclosureOpen,
+  transcriptFoldsStartOpen,
+  transcriptRowsStartOpen,
+  withDisclosureOpen,
+} from "@t3tools/client-runtime/work-log/disclosure";
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import { mobilePreferencesAtom } from "../../state/preferences";
 import {
   renderCodexInlineDirectivesAsMarkdown,
   splitCodexArtifactTemplateMarkdown,
@@ -1587,6 +1597,8 @@ function renderFeedEntry(
   > & {
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
+    readonly foldsStartOpen: boolean;
+    readonly rowsStartOpen: boolean;
     readonly workRowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
     readonly workGroupScrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
@@ -2236,6 +2248,8 @@ function renderFeedEntry(
       anchorKey={entry.id}
       copiedRowId={props.copiedRowId}
       expandedRows={props.expandedWorkRows}
+      foldsStartOpen={props.foldsStartOpen}
+      rowsStartOpen={props.rowsStartOpen}
       rowSizing={props.workRowSizing}
       scrollPositions={props.workGroupScrollPositions}
       iconSubtleColor={iconSubtleColor}
@@ -2492,6 +2506,7 @@ function useThreadFeedPresentation(
   props: ThreadFeedProps,
   expandedTurnIds: ReadonlySet<RunId>,
   expandedWorkGroups: Record<string, boolean>,
+  transcriptView: TranscriptView,
 ) {
   const [feedCache] = useState(createThreadFeedCache);
   return appendPendingThreadMessages(
@@ -2507,6 +2522,7 @@ function useThreadFeedPresentation(
       props.activeWorkStartedAt,
       props.runlessWorkActive ?? false,
       feedCache,
+      transcriptView,
     ),
     props.feed,
     props.queuedMessages,
@@ -2600,7 +2616,28 @@ export const ThreadFeed = memo(function ThreadFeed({
     expandedWorkRows: {},
     expandedTurnIds: new Set(),
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId } = interactionState;
+  let { expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const preferences = useAtomValue(mobilePreferencesAtom);
+  const transcriptView: TranscriptView = AsyncResult.isSuccess(preferences)
+    ? (preferences.value.transcriptView ?? "normal")
+    : "normal";
+  const foldsStartOpen = transcriptFoldsStartOpen(transcriptView);
+  const rowsStartOpen = transcriptRowsStartOpen(transcriptView);
+  // Switching the view starts every disclosure from the new default.
+  const [disclosureView, setDisclosureView] = useState(transcriptView);
+  if (disclosureView !== transcriptView) {
+    setDisclosureView(transcriptView);
+    expandedWorkGroups = {};
+    expandedWorkRows = {};
+    expandedTurnIds = new Set();
+    setInteractionState((current) => ({
+      ...current,
+      expandedWorkGroups,
+      expandedWorkRows,
+      expandedTurnIds,
+    }));
+  }
   const markdownLinkRequest = useRef<AbortController | null>(null);
   const onInlinePlaybackStart = () => {
     markdownLinkRequest.current?.abort();
@@ -3159,7 +3196,7 @@ export const ThreadFeed = memo(function ThreadFeed({
   const { jumpToMessageId } = props;
   const jumpReady = !!jumpToMessageId && loadedListKey === `${feedThreadKey}:filled`;
   const presentedFeed = appendGuestPendingMessages(
-    useThreadFeedPresentation(props, expandedTurnIds, expandedWorkGroups),
+    useThreadFeedPresentation(props, expandedTurnIds, expandedWorkGroups, transcriptView),
     guestShare,
   );
   const jumpRunId =
@@ -3167,10 +3204,10 @@ export const ThreadFeed = memo(function ThreadFeed({
     !presentedFeed.some((entry) => entry.type === "message" && entry.id === jumpToMessageId)
       ? messageFoldRunId(props.feed, jumpToMessageId)
       : null;
-  if (jumpRunId && !expandedTurnIds.has(jumpRunId)) {
+  if (jumpRunId && !disclosureOpen(expandedTurnIds, jumpRunId, foldsStartOpen)) {
     setInteractionState((current) => ({
       ...current,
-      expandedTurnIds: new Set(current.expandedTurnIds).add(jumpRunId),
+      expandedTurnIds: withDisclosureOpen(current.expandedTurnIds, jumpRunId, foldsStartOpen),
     }));
   }
   const setupAnchorIndex = presentedFeed.findIndex(
@@ -3288,7 +3325,8 @@ export const ThreadFeed = memo(function ThreadFeed({
     }
     return new Set(terminalIdsByTurn.values());
   })();
-  // An interrupted run unfolds; a run that is no longer latest folds back.
+  // An interrupted run unfolds; a run that is no longer latest folds back
+  // unless every fold starts open.
   const [previousLatestRun, setPreviousLatestRun] = useState(props.latestRun);
   if (previousLatestRun !== props.latestRun) {
     setPreviousLatestRun(props.latestRun);
@@ -3296,7 +3334,7 @@ export const ThreadFeed = memo(function ThreadFeed({
     const previous = previousLatestRun;
     if (latest && previous) {
       if (latest.runId !== previous.runId) {
-        if (expandedTurnIds.has(previous.runId)) {
+        if (!foldsStartOpen && expandedTurnIds.has(previous.runId)) {
           setInteractionState((current) => {
             const next = new Set(current.expandedTurnIds);
             next.delete(previous.runId);
@@ -3306,7 +3344,11 @@ export const ThreadFeed = memo(function ThreadFeed({
       } else if (previous.status === "running" && latest.status === "interrupted") {
         setInteractionState((current) => ({
           ...current,
-          expandedTurnIds: new Set(current.expandedTurnIds).add(latest.runId),
+          expandedTurnIds: withDisclosureOpen(
+            current.expandedTurnIds,
+            latest.runId,
+            foldsStartOpen,
+          ),
         }));
       }
     }
@@ -3409,7 +3451,8 @@ export const ThreadFeed = memo(function ThreadFeed({
     }));
   };
 
-  // Lone rows share their group's disclosure state so opened details survive a second call joining.
+  // Lone rows share their group's disclosure state so opened details survive a second call
+  // joining. An expanded transcript already opens that group.
   const onToggleWorkRow = (rowId: string, anchorKey?: string, groupId?: string) => {
     suspendEndScrollMaintenanceForDisclosure(anchorKey ?? null);
     setInteractionState((current) => {
@@ -3417,7 +3460,7 @@ export const ThreadFeed = memo(function ThreadFeed({
       return {
         ...current,
         expandedWorkRows: { ...current.expandedWorkRows, [rowId]: expanded },
-        ...(groupId === undefined
+        ...(groupId === undefined || foldsStartOpen
           ? {}
           : { expandedWorkGroups: { ...current.expandedWorkGroups, [groupId]: expanded } }),
       };
@@ -3474,7 +3517,9 @@ export const ThreadFeed = memo(function ThreadFeed({
           return undefined;
         }
         return entry.activities.some(
-          (activity) => activity.prominent || expandedWorkRows[activity.id],
+          (activity) =>
+            activity.prominent ||
+            (activity.canExpand && (expandedWorkRows[activity.id] ?? false) !== rowsStartOpen),
         )
           ? undefined
           : collapsedWorkLogHeight(entry.activities, entry.continuesWorkLog);
@@ -3522,6 +3567,8 @@ export const ThreadFeed = memo(function ThreadFeed({
             threadId: props.threadId,
             copiedRowId,
             expandedWorkRows,
+            foldsStartOpen,
+            rowsStartOpen,
             workRowSizing,
             workGroupScrollPositions,
             terminalAssistantMessageIds,
